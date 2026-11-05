@@ -3,7 +3,6 @@ package com.example.ui.editor.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -23,7 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Videocam
@@ -31,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,7 +49,6 @@ import com.example.data.model.SubtitleCue
 import com.example.data.model.VideoClip
 import com.example.ui.theme.AudioBgmColor
 import com.example.ui.theme.AudioDubColor
-import com.example.ui.theme.AudioVoiceoverColor
 import com.example.ui.theme.PlayheadColor
 import com.example.ui.theme.PurplePrimary
 import com.example.ui.theme.StudioBorder
@@ -58,13 +56,9 @@ import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceCard
 import com.example.ui.theme.StudioSurfaceVariant
 import com.example.ui.theme.StudioTextMuted
-import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
 import com.example.ui.theme.SubtitleTrackColor
 import com.example.ui.theme.VideoTrackColor
-
-// Scaling: 1 second = 60 dp on timeline
-const val DP_PER_SECOND = 60f
 
 @Composable
 fun TimelineView(
@@ -78,14 +72,19 @@ fun TimelineView(
     modifier: Modifier = Modifier
 ) {
     val totalDurationMs = project.totalDurationMs.coerceAtLeast(3000L)
+    
+    // Adaptive timeline scaling: Supports short clips up to 4 hours and 8 hours without RAM bloat
+    val dpPerSecond = remember(totalDurationMs) { calculateAdaptiveDpPerSecond(totalDurationMs) }
+    val stepSeconds = remember(totalDurationMs) { calculateAdaptiveStepSeconds(totalDurationMs) }
+    
     val totalSeconds = (totalDurationMs / 1000f) + 2f // Extra breathing room
-    val timelineWidthDp = (totalSeconds * DP_PER_SECOND).dp
+    val timelineWidthDp = (totalSeconds * dpPerSecond).dp.coerceAtLeast(300.dp)
 
     val scrollState = rememberScrollState()
 
     // Smoothly scroll to keep playhead in view during playback
     LaunchedEffect(currentTimeMs) {
-        val playheadPx = ((currentTimeMs / 1000f) * DP_PER_SECOND * 2.5f).toInt()
+        val playheadPx = ((currentTimeMs / 1000f) * dpPerSecond * 2.5f).toInt()
         val viewportWidth = scrollState.viewportSize
         if (viewportWidth > 0 && (playheadPx < scrollState.value || playheadPx > scrollState.value + viewportWidth - 100)) {
             scrollState.animateScrollTo((playheadPx - viewportWidth / 3).coerceAtLeast(0))
@@ -137,16 +136,20 @@ fun TimelineView(
                     modifier = Modifier
                         .width(timelineWidthDp)
                         .fillMaxHeight()
-                        .pointerInput(totalDurationMs) {
+                        .pointerInput(totalDurationMs, dpPerSecond) {
                             detectTapGestures { offset ->
-                                val clickedSec = offset.x / (DP_PER_SECOND * density)
+                                val clickedSec = offset.x / (dpPerSecond * density)
                                 val seekMs = (clickedSec * 1000).toLong().coerceIn(0L, totalDurationMs)
                                 onSeek(seekMs)
                             }
                         }
                 ) {
-                    // Time Ruler
-                    TimeRulerRow(totalSeconds = totalSeconds.toInt())
+                    // Time Ruler with virtualized/stepped markers
+                    TimeRulerRow(
+                        totalSeconds = totalSeconds.toInt(),
+                        dpPerSecond = dpPerSecond,
+                        stepSeconds = stepSeconds
+                    )
 
                     Spacer(modifier = Modifier.height(4.dp))
 
@@ -154,6 +157,7 @@ fun TimelineView(
                     VideoClipsTrack(
                         clips = project.clips,
                         selectedClipId = selectedClipId,
+                        dpPerSecond = dpPerSecond,
                         onSelectClip = onSelectClip
                     )
 
@@ -163,6 +167,7 @@ fun TimelineView(
                     SubtitlesTrack(
                         subtitles = project.subtitles,
                         selectedSubtitleId = selectedSubtitleId,
+                        dpPerSecond = dpPerSecond,
                         onSelectSubtitle = onSelectSubtitle
                     )
 
@@ -173,7 +178,8 @@ fun TimelineView(
                     AudioItemsTrack(
                         items = dubbingItems,
                         trackColor = AudioDubColor,
-                        labelPrefix = "Dub"
+                        labelPrefix = "Dub",
+                        dpPerSecond = dpPerSecond
                     )
 
                     Spacer(modifier = Modifier.height(4.dp))
@@ -183,12 +189,13 @@ fun TimelineView(
                     AudioItemsTrack(
                         items = bgmItems,
                         trackColor = AudioBgmColor,
-                        labelPrefix = "BGM"
+                        labelPrefix = "BGM",
+                        dpPerSecond = dpPerSecond
                     )
                 }
 
                 // Vertical Playhead Line
-                val playheadOffsetDp = ((currentTimeMs / 1000f) * DP_PER_SECOND).dp
+                val playheadOffsetDp = ((currentTimeMs / 1000f) * dpPerSecond).dp
                 Box(
                     modifier = Modifier
                         .offset { IntOffset(playheadOffsetDp.roundToPx(), 0) }
@@ -238,23 +245,37 @@ fun TrackHeaderItem(icon: ImageVector, color: Color, label: String) {
 }
 
 @Composable
-fun TimeRulerRow(totalSeconds: Int) {
+fun TimeRulerRow(
+    totalSeconds: Int,
+    dpPerSecond: Float,
+    stepSeconds: Int
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(24.dp)
             .background(StudioSurfaceCard)
     ) {
-        for (sec in 0..totalSeconds) {
+        val totalSecClamped = totalSeconds.coerceAtLeast(1)
+        for (sec in 0..totalSecClamped step stepSeconds) {
+            val stepWidth = (stepSeconds * dpPerSecond).dp
             Box(
                 modifier = Modifier
-                    .width(DP_PER_SECOND.dp)
+                    .width(stepWidth)
                     .fillMaxHeight()
                     .padding(start = 2.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
+                val h = sec / 3600
+                val m = (sec % 3600) / 60
+                val s = sec % 60
+                val timeLabel = if (totalSecClamped >= 3600) {
+                    String.format("%02d:%02d:%02d", h, m, s)
+                } else {
+                    String.format("%02d:%02d", m, s)
+                }
                 Text(
-                    text = String.format("%02d:%02d", sec / 60, sec % 60),
+                    text = timeLabel,
                     color = StudioTextMuted,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium
@@ -268,6 +289,7 @@ fun TimeRulerRow(totalSeconds: Int) {
 fun VideoClipsTrack(
     clips: List<VideoClip>,
     selectedClipId: String?,
+    dpPerSecond: Float,
     onSelectClip: (String) -> Unit
 ) {
     Row(
@@ -288,7 +310,7 @@ fun VideoClipsTrack(
             }
         } else {
             clips.forEach { clip ->
-                val clipWidthDp = ((clip.effectiveDurationMs / 1000f) * DP_PER_SECOND).dp.coerceAtLeast(36.dp)
+                val clipWidthDp = ((clip.effectiveDurationMs / 1000f) * dpPerSecond).dp.coerceAtLeast(24.dp)
                 val isSelected = clip.id == selectedClipId
 
                 Box(
@@ -325,6 +347,7 @@ fun VideoClipsTrack(
 fun SubtitlesTrack(
     subtitles: List<SubtitleCue>,
     selectedSubtitleId: String?,
+    dpPerSecond: Float,
     onSelectSubtitle: (String) -> Unit
 ) {
     Box(
@@ -333,8 +356,8 @@ fun SubtitlesTrack(
             .height(34.dp)
     ) {
         subtitles.forEach { cue ->
-            val startDp = ((cue.startMs / 1000f) * DP_PER_SECOND).dp
-            val widthDp = ((cue.durationMs / 1000f) * DP_PER_SECOND).dp.coerceAtLeast(30.dp)
+            val startDp = ((cue.startMs / 1000f) * dpPerSecond).dp
+            val widthDp = ((cue.durationMs / 1000f) * dpPerSecond).dp.coerceAtLeast(18.dp)
             val isSelected = cue.id == selectedSubtitleId
 
             Box(
@@ -350,7 +373,7 @@ fun SubtitlesTrack(
                         shape = RoundedCornerShape(6.dp)
                     )
                     .clickable { onSelectSubtitle(cue.id) }
-                    .padding(horizontal = 6.dp),
+                    .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
                 Text(
@@ -370,7 +393,8 @@ fun SubtitlesTrack(
 fun AudioItemsTrack(
     items: List<AudioTrackItem>,
     trackColor: Color,
-    labelPrefix: String
+    labelPrefix: String,
+    dpPerSecond: Float
 ) {
     Box(
         modifier = Modifier
@@ -378,8 +402,8 @@ fun AudioItemsTrack(
             .height(34.dp)
     ) {
         items.forEach { item ->
-            val startDp = ((item.startTimelineMs / 1000f) * DP_PER_SECOND).dp
-            val widthDp = ((item.durationMs / 1000f) * DP_PER_SECOND).dp.coerceAtLeast(28.dp)
+            val startDp = ((item.startTimelineMs / 1000f) * dpPerSecond).dp
+            val widthDp = ((item.durationMs / 1000f) * dpPerSecond).dp.coerceAtLeast(18.dp)
 
             Box(
                 modifier = Modifier
@@ -389,7 +413,7 @@ fun AudioItemsTrack(
                     .clip(RoundedCornerShape(6.dp))
                     .background(trackColor)
                     .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp),
+                    .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
                 Text(
@@ -402,5 +426,26 @@ fun AudioItemsTrack(
                 )
             }
         }
+    }
+}
+
+private fun calculateAdaptiveDpPerSecond(durationMs: Long): Float {
+    return when {
+        durationMs <= 180_000L -> 40f      // <= 3 minutes: 40 dp/sec
+        durationMs <= 900_000L -> 15f      // <= 15 minutes: 15 dp/sec
+        durationMs <= 3_600_000L -> 5f     // <= 1 hour: 5 dp/sec
+        durationMs <= 14_400_000L -> 1.2f  // <= 4 hours: 1.2 dp/sec (~17,280 dp)
+        else -> 0.6f                       // <= 8 hours: 0.6 dp/sec (~17,280 dp)
+    }
+}
+
+private fun calculateAdaptiveStepSeconds(durationMs: Long): Int {
+    return when {
+        durationMs <= 60_000L -> 5         // Every 5s
+        durationMs <= 300_000L -> 15       // Every 15s
+        durationMs <= 900_000L -> 30       // Every 30s
+        durationMs <= 3_600_000L -> 120    // Every 2 min
+        durationMs <= 14_400_000L -> 600   // Every 10 min
+        else -> 1800                       // Every 30 min for 8-hour mode
     }
 }

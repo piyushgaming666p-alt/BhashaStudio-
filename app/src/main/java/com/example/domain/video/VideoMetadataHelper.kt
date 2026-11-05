@@ -11,6 +11,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import com.example.data.model.MaxVideoDuration
 import com.example.data.model.VideoClip
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,7 +26,11 @@ class VideoMetadataHelper(private val context: Context) {
      * Copies a user-picked content URI to the app's internal cache directory.
      * Prevents URI permission expiration and guarantees fast local file access.
      */
-    suspend fun importVideoFromUri(uri: Uri, fileName: String? = null): VideoClip? = withContext(Dispatchers.IO) {
+    suspend fun importVideoFromUri(
+        uri: Uri,
+        fileName: String? = null,
+        maxDurationMs: Long = MaxVideoDuration.DEFAULT.maxMs
+    ): VideoClip? = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val importDir = File(context.cacheDir, "imported_videos").apply { mkdirs() }
         val name = fileName ?: "clip_${System.currentTimeMillis()}.mp4"
@@ -38,7 +43,7 @@ class VideoMetadataHelper(private val context: Context) {
                 }
             } ?: return@withContext null
 
-            extractVideoMetadata(destinationFile, uri.toString(), name)
+            extractVideoMetadata(destinationFile, uri.toString(), name, maxDurationMs)
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -47,8 +52,14 @@ class VideoMetadataHelper(private val context: Context) {
 
     /**
      * Extracts duration, resolution, and rotation using MediaMetadataRetriever.
+     * Respects configurable maximum duration (4 hours default, future 8 hours support).
      */
-    fun extractVideoMetadata(file: File, originalUri: String, displayName: String): VideoClip {
+    fun extractVideoMetadata(
+        file: File,
+        originalUri: String,
+        displayName: String,
+        maxDurationMs: Long = MaxVideoDuration.DEFAULT.maxMs
+    ): VideoClip {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)
@@ -57,7 +68,8 @@ class VideoMetadataHelper(private val context: Context) {
             val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
             val rotationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
 
-            val durationMs = durationStr?.toLongOrNull() ?: 5000L
+            val rawDurationMs = durationStr?.toLongOrNull() ?: 5000L
+            val durationMs = rawDurationMs.coerceAtMost(maxDurationMs)
             val width = widthStr?.toIntOrNull() ?: 1280
             val height = heightStr?.toIntOrNull() ?: 720
             val rotation = rotationStr?.toIntOrNull() ?: 0

@@ -7,10 +7,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AspectRatio
 import com.example.data.model.AudioTrackItem
+import com.example.data.model.AudioTrackType
+import com.example.data.model.ChunkProcessingConfig
 import com.example.data.model.ExportConfig
 import com.example.data.model.LanguageCatalog
+import com.example.data.model.LongVideoProcessingProgress
+import com.example.data.model.MaxVideoDuration
 import com.example.data.model.Project
 import com.example.data.model.SubtitleCue
+import com.example.domain.video.VideoChunkProcessor
 import com.example.data.model.SubtitleStyle
 import com.example.data.model.SupportedLanguage
 import com.example.data.model.TextOverlay
@@ -49,6 +54,7 @@ sealed class ActivePanel {
     data object TEXT_OVERLAY : ActivePanel()
     data object EXPORT : ActivePanel()
     data object PROJECTS : ActivePanel()
+    data object DURATION_SETTINGS : ActivePanel()
 }
 
 class VideoEditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -61,6 +67,17 @@ class VideoEditorViewModel(application: Application) : AndroidViewModel(applicat
     val sfxLibrary = SoundEffectsLibrary(application)
     private val videoHelper = VideoMetadataHelper(application)
     private val videoExporter = VideoExporter(application)
+    val chunkProcessor = VideoChunkProcessor(ttsService)
+
+    // Configurable maximum video duration (4 hours current, 8 hours future extended)
+    private val _maxVideoDurationConfig = MutableStateFlow(MaxVideoDuration.DEFAULT)
+    val maxVideoDurationConfig: StateFlow<MaxVideoDuration> = _maxVideoDurationConfig.asStateFlow()
+
+    private val _chunkConfig = MutableStateFlow(ChunkProcessingConfig())
+    val chunkConfig: StateFlow<ChunkProcessingConfig> = _chunkConfig.asStateFlow()
+
+    private val _longVideoProgress = MutableStateFlow(LongVideoProcessingProgress())
+    val longVideoProgress: StateFlow<LongVideoProcessingProgress> = _longVideoProgress.asStateFlow()
 
     // Current Project
     private val _project = MutableStateFlow(Project(name = "Bhasha Studio Project"))
@@ -222,11 +239,25 @@ class VideoEditorViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun setMaxVideoDuration(duration: MaxVideoDuration) {
+        _maxVideoDurationConfig.value = duration
+        _chunkConfig.value = _chunkConfig.value.copy(maxDuration = duration)
+    }
+
+    fun toggleChunking(enabled: Boolean) {
+        _chunkConfig.value = _chunkConfig.value.copy(isChunkingEnabled = enabled)
+    }
+
+    fun setChunkDurationMinutes(minutes: Int) {
+        _chunkConfig.value = _chunkConfig.value.copy(chunkDurationMinutes = minutes.coerceIn(5, 60))
+    }
+
     fun importVideo(uri: Uri, displayName: String?) {
         viewModelScope.launch {
             _isAiBusy.value = true
-            _aiStatusMessage.value = "Importing video to studio cache..."
-            val clip = videoHelper.importVideoFromUri(uri, displayName)
+            val maxDuration = _maxVideoDurationConfig.value
+            _aiStatusMessage.value = "Importing video to studio cache (Limit: ${maxDuration.label})..."
+            val clip = videoHelper.importVideoFromUri(uri, displayName, maxDuration.maxMs)
             if (clip != null) {
                 val updatedClips = _project.value.clips + clip
                 _project.value = _project.value.copy(clips = updatedClips)
@@ -422,27 +453,82 @@ class VideoEditorViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             if (_project.value.subtitles.isEmpty()) return@launch
             _isAiBusy.value = true
-            _aiStatusMessage.value = "Synthesizing Hindi AI Voice Dubbing..."
-
             val lang = LanguageCatalog.fromCode(_project.value.targetLanguage)
-            val dubbedTracks = ttsService.synthesizeFullDubbing(
-                cues = _project.value.subtitles,
-                language = lang,
-                voiceId = _selectedVoice.value?.id,
-                pitch = _ttsPitch.value,
-                speechRate = _ttsRate.value
-            ) { current, total ->
-                _aiStatusMessage.value = "Synthesizing voice: $current of $total segments"
+            val totalDuration = _project.value.totalDurationMs
+            val config = _chunkConfig.value
+
+            if (config.isChunkingEnabled && totalDuration > config.chunkDurationMs) {
+                // Chunk-Based Dubbing for Long Videos (4 hours to 8 hours)
+                val chunks = chunkProcessor.createChunksForDuration(totalDuration, config)
+                _longVideoProgress.value = LongVideoProcessingProgress(
+                    isProcessing = true,
+                    currentChunkIndex = 0,
+                    totalChunks = chunks.size,
+                    overallProgress = 0f,
+                    stageMessage = "Starting chunk-based dubbing for ${chunks.size} chunks..."
+                )
+
+                val allDubbedTracks = mutableListOf<AudioTrackItem>()
+                for (chunk in chunks) {
+                    _aiStatusMessage.value = "Dubbing Chunk ${chunk.index + 1}/${chunks.size} (${chunk.startMs / 60000}m - ${chunk.endMs / 60000}m)..."
+                    _longVideoProgress.value = _longVideoProgress.value.copy(
+                        currentChunkIndex = chunk.index + 1,
+                        overallProgress = chunk.index.toFloat() / chunks.size,
+                        stageMessage = "Processing chunk ${chunk.index + 1} of ${chunks.size}"
+                    )
+
+                    val chunkTracks = chunkProcessor.processDubbingChunk(
+                        chunk = chunk,
+                        allCues = _project.value.subtitles,
+                        language = lang,
+                        voiceId = _selectedVoice.value?.id,
+                        pitch = _ttsPitch.value,
+                        speechRate = _ttsRate.value
+                    ) { current, totalInChunk ->
+                        _aiStatusMessage.value = "Chunk ${chunk.index + 1}/${chunks.size}: synthesized $current/$totalInChunk cues"
+                    }
+                    allDubbedTracks.addAll(chunkTracks)
+
+                    // Automatic Progress Saving after each chunk completes
+                    val cleanAudio = _project.value.audioTracks.filterNot { it.type == AudioTrackType.DUBBING }
+                    _project.value = _project.value.copy(
+                        audioTracks = cleanAudio + allDubbedTracks,
+                        originalVideoVolume = 0.3f
+                    )
+                    saveCurrentProject()
+                    _longVideoProgress.value = _longVideoProgress.value.copy(
+                        lastSavedTimestamp = System.currentTimeMillis()
+                    )
+                }
+
+                _longVideoProgress.value = LongVideoProcessingProgress(
+                    isProcessing = false,
+                    currentChunkIndex = chunks.size,
+                    totalChunks = chunks.size,
+                    overallProgress = 1f,
+                    stageMessage = "Completed: All ${chunks.size} chunks dubbed and auto-saved."
+                )
+            } else {
+                // Standard single pass for short clips
+                _aiStatusMessage.value = "Synthesizing Hindi AI Voice Dubbing..."
+                val dubbedTracks = ttsService.synthesizeFullDubbing(
+                    cues = _project.value.subtitles,
+                    language = lang,
+                    voiceId = _selectedVoice.value?.id,
+                    pitch = _ttsPitch.value,
+                    speechRate = _ttsRate.value
+                ) { current, total ->
+                    _aiStatusMessage.value = "Synthesizing voice: $current of $total segments"
+                }
+
+                val cleanAudio = _project.value.audioTracks.filterNot { it.type == AudioTrackType.DUBBING }
+                _project.value = _project.value.copy(
+                    audioTracks = cleanAudio + dubbedTracks,
+                    originalVideoVolume = 0.3f
+                )
+                saveCurrentProject()
             }
 
-            // Remove previous dubbing tracks and add new synchronized tracks
-            val cleanAudio = _project.value.audioTracks.filterNot { it.type == com.example.data.model.AudioTrackType.DUBBING }
-            _project.value = _project.value.copy(
-                audioTracks = cleanAudio + dubbedTracks,
-                // Lower original video audio to 30% so dubbed voice stands out clearly
-                originalVideoVolume = 0.3f
-            )
-            saveCurrentProject()
             _isAiBusy.value = false
         }
     }

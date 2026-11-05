@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.AvTimer
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
@@ -88,6 +89,7 @@ import com.example.ui.editor.components.TimelineView
 import com.example.ui.editor.components.VideoPlayerView
 import com.example.ui.export.ExportDialog
 import com.example.ui.projects.ProjectsListDialog
+import com.example.ui.settings.LongVideoSettingsDialog
 import com.example.ui.subtitles.SrtExportDialog
 import com.example.ui.subtitles.SubtitleStudioPanel
 import com.example.ui.subtitles.SubtitleStyleDialog
@@ -137,6 +139,10 @@ fun EditorScreen(
     val recordedDurationMs by viewModel.voiceRecorder.recordedDurationMs.collectAsState()
     val recordingAmplitude by viewModel.voiceRecorder.currentAmplitude.collectAsState()
 
+    val maxVideoDurationConfig by viewModel.maxVideoDurationConfig.collectAsState()
+    val chunkConfig by viewModel.chunkConfig.collectAsState()
+    val longVideoProgress by viewModel.longVideoProgress.collectAsState()
+
     // Dialog flags
     var showSubtitleStyleDialog by remember { mutableStateOf(false) }
     var showSrtDialog by remember { mutableStateOf(false) }
@@ -144,6 +150,7 @@ fun EditorScreen(
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showTextOverlayDialog by remember { mutableStateOf(false) }
     var showAspectMenu by remember { mutableStateOf(false) }
+    var showLongVideoSettingsDialog by remember { mutableStateOf(false) }
 
     // System Video File Picker
     val videoPickerLauncher = rememberLauncherForActivityResult(
@@ -225,6 +232,18 @@ fun EditorScreen(
                     }
 
                     Spacer(modifier = Modifier.width(6.dp))
+
+                    // Duration & Long Video Engine Config
+                    IconButton(
+                        onClick = { showLongVideoSettingsDialog = true },
+                        modifier = Modifier.testTag("duration_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AvTimer,
+                            contentDescription = "Video Duration & Chunking Settings",
+                            tint = if (maxVideoDurationConfig == com.example.data.model.MaxVideoDuration.EIGHT_HOURS) PurpleSecondary else StudioTextSecondary
+                        )
+                    }
 
                     // Projects list
                     IconButton(
@@ -528,6 +547,24 @@ fun EditorScreen(
             onDismiss = { showTextOverlayDialog = false }
         )
     }
+
+    // Long Video Engine & Max Duration Settings Dialog
+    if (showLongVideoSettingsDialog) {
+        LongVideoSettingsDialog(
+            currentDuration = maxVideoDurationConfig,
+            chunkConfig = chunkConfig,
+            onSelectDuration = { maxDuration ->
+                viewModel.setMaxVideoDuration(maxDuration)
+            },
+            onToggleChunking = { enabled ->
+                viewModel.toggleChunking(enabled)
+            },
+            onSelectChunkMinutes = { minutes ->
+                viewModel.setChunkDurationMinutes(minutes)
+            },
+            onDismiss = { showLongVideoSettingsDialog = false }
+        )
+    }
 }
 
 @Composable
@@ -799,9 +836,14 @@ fun AddTextOverlayDialog(
 }
 
 private fun formatTime(millis: Long): String {
-    val sec = millis / 1000
+    val totalSec = millis / 1000
     val ms = (millis % 1000) / 10
-    val min = sec / 60
-    val remSec = sec % 60
-    return String.format("%02d:%02d.%02d", min, remSec, ms)
+    val h = totalSec / 3600
+    val min = (totalSec % 3600) / 60
+    val remSec = totalSec % 60
+    return if (h > 0) {
+        String.format("%02d:%02d:%02d", h, min, remSec)
+    } else {
+        String.format("%02d:%02d.%02d", min, remSec, ms)
+    }
 }

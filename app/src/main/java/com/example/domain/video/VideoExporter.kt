@@ -242,7 +242,23 @@ class VideoExporter(private val context: Context) {
 
                 if (frameIndex % (fps / 2) == 0) {
                     val progress = 0.20f + 0.65f * (frameIndex.toFloat() / totalFrames)
-                    onProgress(progress, "Rendering video: ${(progress * 100).toInt()}%")
+                    val currentH = currentSec / 3600
+                    val currentM = (currentSec % 3600) / 60
+                    val currentS = currentSec % 60
+                    val totalH = totalDurationMs / 3600000
+                    val totalM = (totalDurationMs % 3600000) / 60000
+                    val timeStr = if (totalH > 0) {
+                        String.format("%02d:%02d:%02d / %02d:%02d:00", currentH, currentM, currentS, totalH, totalM)
+                    } else {
+                        String.format("%02d:%02d / %02d:%02d", currentM, currentS, totalM, (totalDurationMs % 60000) / 1000)
+                    }
+                    onProgress(progress, "Rendering: ${(progress * 100).toInt()}% ($timeStr)")
+                }
+
+                // Low-RAM guard for long videos (4-8 hours) on 4-6 GB RAM devices:
+                // Periodically trigger memory cleanup every 30 seconds of processed video
+                if (frameIndex > 0 && frameIndex % (fps * 30) == 0) {
+                    System.gc()
                 }
             }
 

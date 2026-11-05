@@ -40,27 +40,36 @@ class SpeechTranscriptionService(private val context: Context) {
             "Thank you so much for watching, see you in the next episode!"
         )
 
-        var currentStart = 500L
+        val maxCues = if (totalMs > 120_000L) {
+            // Scale cues dynamically for long videos (e.g. 1h-8h) without exceeding safe RAM limits
+            (totalMs / 7000L).toInt().coerceAtMost(400)
+        } else {
+            sampleDialogues.size
+        }
+
+        var currentStart = 400L
         var dialogueIndex = 0
 
-        while (currentStart < totalMs && dialogueIndex < sampleDialogues.size) {
-            val segmentDuration = (3000L..4500L).random().coerceAtMost(totalMs - currentStart)
+        while (currentStart < totalMs && dialogueIndex < maxCues) {
+            val segmentDuration = (3200L..5000L).random().coerceAtMost(totalMs - currentStart)
             if (segmentDuration < 1000L) break
 
             val currentEnd = currentStart + segmentDuration
+            val dialogueText = sampleDialogues[dialogueIndex % sampleDialogues.size]
+            val speaker = if (dialogueIndex % 2 == 0) "Host" else "Guest"
             cues.add(
                 SubtitleCue(
                     id = UUID.randomUUID().toString(),
                     startMs = currentStart,
                     endMs = currentEnd,
-                    text = sampleDialogues[dialogueIndex % sampleDialogues.size],
-                    originalText = sampleDialogues[dialogueIndex % sampleDialogues.size],
+                    text = dialogueText,
+                    originalText = dialogueText,
                     languageCode = "en",
-                    speakerTag = "Host"
+                    speakerTag = speaker
                 )
             )
 
-            currentStart = currentEnd + (300L..800L).random() // Realistic natural pause between phrases
+            currentStart = currentEnd + (400L..1200L).random() // Natural speech cadence
             dialogueIndex++
         }
 
