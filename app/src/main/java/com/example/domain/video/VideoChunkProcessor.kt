@@ -18,34 +18,41 @@ class VideoChunkProcessor(
     private val ttsDubbingService: TextToSpeechDubbingService
 ) {
 
-    /**
-     * Splits a total duration (up to 8 hours / 480 minutes) into sequential chunks.
-     * Default chunk duration is 15 minutes.
-     */
+    companion object {
+        /**
+         * Splits a total duration (up to 8 hours / 480 minutes) into sequential chunks.
+         * Default chunk duration is 15 minutes.
+         */
+        fun createChunksForDuration(
+            totalDurationMs: Long,
+            config: ChunkProcessingConfig = ChunkProcessingConfig()
+        ): List<VideoChunk> {
+            val chunkDuration = config.chunkDurationMs
+            val clampedTotalMs = totalDurationMs.coerceIn(1000L, config.maxDuration.maxMs)
+            val chunkCount = ((clampedTotalMs + chunkDuration - 1) / chunkDuration).toInt().coerceAtLeast(1)
+
+            val chunks = mutableListOf<VideoChunk>()
+            for (i in 0 until chunkCount) {
+                val startMs = i * chunkDuration
+                val endMs = ((i + 1) * chunkDuration).coerceAtMost(clampedTotalMs)
+                chunks.add(
+                    VideoChunk(
+                        index = i,
+                        totalChunks = chunkCount,
+                        startMs = startMs,
+                        endMs = endMs,
+                        isCompleted = false
+                    )
+                )
+            }
+            return chunks
+        }
+    }
+
     fun createChunksForDuration(
         totalDurationMs: Long,
         config: ChunkProcessingConfig = ChunkProcessingConfig()
-    ): List<VideoChunk> {
-        val chunkDuration = config.chunkDurationMs
-        val clampedTotalMs = totalDurationMs.coerceIn(1000L, config.maxDuration.maxMs)
-        val chunkCount = ((clampedTotalMs + chunkDuration - 1) / chunkDuration).toInt().coerceAtLeast(1)
-
-        val chunks = mutableListOf<VideoChunk>()
-        for (i in 0 until chunkCount) {
-            val startMs = i * chunkDuration
-            val endMs = ((i + 1) * chunkDuration).coerceAtMost(clampedTotalMs)
-            chunks.add(
-                VideoChunk(
-                    index = i,
-                    totalChunks = chunkCount,
-                    startMs = startMs,
-                    endMs = endMs,
-                    isCompleted = false
-                )
-            )
-        }
-        return chunks
-    }
+    ): List<VideoChunk> = Companion.createChunksForDuration(totalDurationMs, config)
 
     /**
      * Filters subtitle cues that fall within a specific chunk's time window.
